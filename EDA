@@ -1,0 +1,82 @@
+from matplotlib import pyplot as plt
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000  # adjust for your memory
+
+# initialize empty DataFrame for ransomware only
+df_ransom = pd.DataFrame()
+
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE):
+    # filter only ransomware flows to reduce memory
+    df_ransom = pd.concat([df_ransom, chunk[chunk["Attack"].str.contains("ransom", case=False)]])
+
+# Zero-duration analysis
+zero_duration = (df_ransom["FLOW_DURATION_MILLISECONDS"] == 0).mean()
+print(f"Zero-duration ransomware flows: {zero_duration:.2%}")
+
+# Basic descriptive stats
+metrics = ["FLOW_DURATION_MILLISECONDS", "IN_BYTES", "OUT_BYTES", "IN_PKTS", "OUT_PKTS"]
+print(df_ransom[metrics].describe())
+
+# Histogram for duration
+plt.hist(df_ransom["FLOW_DURATION_MILLISECONDS"], bins=50)
+plt.title("Ransomware Flow Duration")
+plt.xlabel("Milliseconds")
+plt.ylabel("Frequency")
+plt.show()
+
+df_ransom["flow_start_sec"] = (df_ransom["FLOW_START_MILLISECONDS"] / 1000).astype(int)
+if "FLOW_END_MILLISECONDS" in df_ransom.columns:
+    df_ransom["FLOW_DURATION_MILLISECONDS"] = df_ransom["FLOW_END_MILLISECONDS"] - df_ransom["FLOW_START_MILLISECONDS"]
+
+WINDOW = 60  # seconds
+
+# create a time window column
+df_ransom["time_window"] = df_ransom["flow_start_sec"] // WINDOW
+
+# group by SRC IP and window
+coord_counts = df_ransom.groupby(["IPV4_SRC_ADDR", "time_window"])["IPV4_DST_ADDR"].nunique().reset_index()
+coord_counts["COORDINATION_LEVEL"] = coord_counts["IPV4_DST_ADDR"].apply(lambda x: "Coordinated" if x > 1 else "Individual")
+
+# merge back
+df_ransom = df_ransom.merge(coord_counts[["IPV4_SRC_ADDR", "time_window", "COORDINATION_LEVEL"]],
+                            on=["IPV4_SRC_ADDR", "time_window"])
+
+metrics = ["FLOW_DURATION_MILLISECONDS", "IN_BYTES", "OUT_BYTES", "IN_PKTS", "OUT_PKTS"]
+
+for metric in metrics:
+    print(f"\nMetric: {metric}")
+    print(df_ransom.groupby("COORDINATION_LEVEL")[metric].agg(["mean", "median", "sum"]))
+
+coord_df = df_ransom[df_ransom["COORDINATION_LEVEL"].notna()]
+
+plt.figure(figsize=(6,4))
+plt.scatter(coord_df["IN_BYTES"], coord_df["OUT_BYTES"], 
+            c=coord_df["COORDINATION_LEVEL"].map({"Individual":0,"Coordinated":1}),
+            alpha=0.3)
+plt.xlabel("IN_BYTES")
+plt.ylabel("OUT_BYTES")
+plt.title("Ransomware Coordination Scatter")
+plt.show()
+
+feature_cols = ["FLOW_DURATION_MILLISECONDS", "IN_BYTES", "OUT_BYTES", "IN_PKTS", "OUT_PKTS"]
+X = df_ransom[feature_cols].fillna(0)
+y = df_ransom["COORDINATION_LEVEL"]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+rf.fit(X_train, y_train)
+print("✅ Random Forest trained")
+
+
+importances = pd.Series(rf.feature_importances_, index=feature_cols).sort_values(ascending=False)
+importances.plot.barh()
+
+print("\n📊 Feature Importances (Random Forest):")
+for feat, val in importances.items():
+    print(f"{feat:35s} {val:.4f}")
+plt.title("Feature Importance: Individual vs Coordinated")
+plt.show()

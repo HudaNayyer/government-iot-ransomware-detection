@@ -1,0 +1,192 @@
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedKFold, cross_validate
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+from sklearn.metrics import make_scorer, f1_score, recall_score, precision_score, roc_auc_score
+import matplotlib.pyplot as plt
+
+print("="*60)
+print("PHASE 2: CROSS-VALIDATION STUDY")
+print("="*60)
+
+# ── Load ransomware data and apply coordination labelling ──
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000
+WINDOW = 60
+
+print("📥 Loading ransomware flows...")
+df_ransom = pd.DataFrame()
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE):
+    df_ransom = pd.concat([
+        df_ransom,
+        chunk[chunk["Attack"].str.contains("ransom", case=False, na=False)]
+    ])
+
+print(f"✅ Total ransomware samples: {len(df_ransom)}")
+
+# Apply coordination labelling
+df_ransom["flow_start_sec"] = (
+    df_ransom["FLOW_START_MILLISECONDS"] / 1000).astype(int)
+df_ransom["time_window"] = df_ransom["flow_start_sec"] // WINDOW
+
+coord_counts = (
+    df_ransom
+    .groupby(["IPV4_SRC_ADDR", "time_window"])["IPV4_DST_ADDR"]
+    .nunique()
+    .reset_index()
+)
+coord_counts["COORDINATION_LEVEL"] = coord_counts["IPV4_DST_ADDR"].apply(
+    lambda x: "Coordinated" if x > 1 else "Individual")
+
+df_ransom = df_ransom.merge(
+    coord_counts[["IPV4_SRC_ADDR", "time_window", "COORDINATION_LEVEL"]],
+    on=["IPV4_SRC_ADDR", "time_window"]
+)
+
+print(f"📊 Label distribution:")
+print(df_ransom["COORDINATION_LEVEL"].value_counts())
+
+# ── Prepare features ──
+exclude_features = [
+    'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
+    'IPV4_SRC_ADDR', 'IPV4_DST_ADDR',
+    'L4_SRC_PORT', 'L4_DST_PORT',
+    'flow_start_sec', 'time_window',
+    'Label', 'Attack', 'label',
+    'COORDINATION_LEVEL'
+]
+
+with open('feature_names.txt', 'r') as f:
+    feature_names = [line.strip() for line in f]
+
+feature_cols = [f for f in feature_names if f in df_ransom.columns]
+X = df_ransom[feature_cols].fillna(0).values
+y = (df_ransom["COORDINATION_LEVEL"] == "Coordinated").astype(int).values
+
+print(f"\nX shape: {X.shape}")
+print(f"Class distribution: {np.bincount(y)}")
+
+# ── Scoring ──
+scoring = {
+    'f1': 'f1',
+    'recall': 'recall',
+    'precision': 'precision',
+    'roc_auc': 'roc_auc'
+}
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ── Random Forest + SMOTE ──
+print("\n" + "="*50)
+print("5-FOLD CV: RANDOM FOREST + SMOTE")
+print("="*50)
+
+rf_smote_pipeline = ImbPipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('rf', RandomForestClassifier(
+        n_estimators=100,
+        criterion='gini',
+        min_samples_split=5,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=-1
+    ))
+])
+
+rf_cv = cross_validate(rf_smote_pipeline, X, y, cv=cv,
+                       scoring=scoring, error_score='raise')
+
+print(f"F1-Score:  {rf_cv['test_f1'].mean():.4f} ± {rf_cv['test_f1'].std():.4f}")
+print(f"Recall:    {rf_cv['test_recall'].mean():.4f} ± {rf_cv['test_recall'].std():.4f}")
+print(f"Precision: {rf_cv['test_precision'].mean():.4f} ± {rf_cv['test_precision'].std():.4f}")
+print(f"ROC-AUC:   {rf_cv['test_roc_auc'].mean():.4f} ± {rf_cv['test_roc_auc'].std():.4f}")
+
+# ── SVM + SMOTE ──
+print("\n" + "="*50)
+print("5-FOLD CV: SVM + SMOTE")
+print("="*50)
+
+svm_smote_pipeline = ImbPipeline([
+    ('smote', SMOTE(random_state=42)),
+    ('scaler', StandardScaler()),
+    ('svm', SVC(
+        kernel='rbf',
+        C=1.0,
+        gamma='scale',
+        probability=True,
+        random_state=42
+    ))
+])
+
+
+svm_cv = cross_validate(svm_smote_pipeline, X, y, cv=cv,
+                        scoring=scoring, error_score='raise')
+
+print(f"F1-Score:  {svm_cv['test_f1'].mean():.4f} ± {svm_cv['test_f1'].std():.4f}")
+print(f"Recall:    {svm_cv['test_recall'].mean():.4f} ± {svm_cv['test_recall'].std():.4f}")
+print(f"Precision: {svm_cv['test_precision'].mean():.4f} ± {svm_cv['test_precision'].std():.4f}")
+print(f"ROC-AUC:   {svm_cv['test_roc_auc'].mean():.4f} ± {svm_cv['test_roc_auc'].std():.4f}")
+
+# ── Save Results ──
+cv_results = pd.DataFrame({
+    'Model': ['Random Forest'] * 5 + ['SVM'] * 5,
+    'Fold':  list(range(1, 6)) * 2,
+    'F1':        list(rf_cv['test_f1'])        + list(svm_cv['test_f1']),
+    'Recall':    list(rf_cv['test_recall'])    + list(svm_cv['test_recall']),
+    'Precision': list(rf_cv['test_precision']) + list(svm_cv['test_precision']),
+    'ROC_AUC':   list(rf_cv['test_roc_auc'])   + list(svm_cv['test_roc_auc']),
+})
+cv_results.to_csv('phase2_cv_results.csv', index=False)
+
+# ── Visualisation ──
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+for fold_f1, label, color in zip(
+    [rf_cv['test_f1'], svm_cv['test_f1']],
+    ['Random Forest + SMOTE', 'SVM + SMOTE'],
+    ['steelblue', 'tomato']
+):
+    axes[0].plot(range(1, 6), fold_f1, marker='o',
+                 label=label, color=color)
+
+axes[0].set_xlabel('Fold')
+axes[0].set_ylabel('F1-Score (Coordinated class)')
+axes[0].set_title('Phase 2: F1-Score per Fold')
+axes[0].set_ylim([0.5, 1.05])
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+metrics_labels = ['F1', 'Recall', 'Precision', 'ROC_AUC']
+rf_means  = [rf_cv[f'test_{m.lower()}'].mean()  for m in
+             ['f1','recall','precision','roc_auc']]
+rf_stds   = [rf_cv[f'test_{m.lower()}'].std()   for m in
+             ['f1','recall','precision','roc_auc']]
+svm_means = [svm_cv[f'test_{m.lower()}'].mean() for m in
+             ['f1','recall','precision','roc_auc']]
+svm_stds  = [svm_cv[f'test_{m.lower()}'].std()  for m in
+             ['f1','recall','precision','roc_auc']]
+
+x = np.arange(len(metrics_labels))
+width = 0.35
+axes[1].bar(x - width/2, rf_means, width, yerr=rf_stds,
+            label='Random Forest', color='steelblue', capsize=4)
+axes[1].bar(x + width/2, svm_means, width, yerr=svm_stds,
+            label='SVM', color='tomato', capsize=4)
+axes[1].set_xticks(x)
+axes[1].set_xticklabels(metrics_labels)
+axes[1].set_ylim([0.5, 1.05])
+axes[1].set_title('Phase 2: 5-Fold CV Results (Mean ± Std)')
+axes[1].set_ylabel('Score')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.savefig('phase2_cv_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n✅ Phase 2 cross-validation complete!")
+print("📁 Saved: phase2_cv_results.csv, phase2_cv_results.png")

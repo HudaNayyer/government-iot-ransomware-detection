@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+print("="*60)
+print("PHASE 1: PREPARING DATA FOR MACHINE LEARNING")
+print("="*60)
+
+# 1. Load your balanced dataset
+print("📥 Loading balanced dataset...")
+df = pd.read_csv("phase1_benign_vs_ransomware.csv")
+print(f"Dataset shape: {df.shape}")
+
+# 2. Check labels
+print("\n📊 Label distribution:")
+print(df['label'].value_counts())
+
+# 3. Select ONLY behavioral features (NO timestamps, NO IPs)
+print("\n🔍 Selecting behavioral features...")
+
+# List of features to EXCLUDE (potential label leakage)
+exclude_features = [
+    'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
+    'IPV4_SRC_ADDR', 'IPV4_DST_ADDR',  # IP addresses
+    'L4_SRC_PORT', 'L4_DST_PORT',       # Ports
+    'flow_start_sec', 'time_window',    # Your EDA created these
+    'Label', 'Attack', 'label'          # Label columns
+]
+
+# Start with all columns, then remove excluded ones
+all_columns = df.columns.tolist()
+feature_columns = [col for col in all_columns if col not in exclude_features]
+
+print(f"Selected {len(feature_columns)} behavioral features")
+print("\nFirst 15 features:")
+for i, feat in enumerate(feature_columns[:15], 1):
+    print(f"  {i:2}. {feat}")
+
+# 4. Prepare X (features) and y (labels)
+print("\n🔧 Preparing X and y...")
+X = df[feature_columns].copy()
+
+# Fill any missing values with 0
+if X.isnull().sum().sum() > 0:
+    print(f"Filling {X.isnull().sum().sum()} missing values with 0")
+    X = X.fillna(0)
+
+# Convert to numeric (in case of any non-numeric columns)
+for col in X.columns:
+    if X[col].dtype == 'object':
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+X = X.fillna(0)
+
+# Prepare labels (Ransomware=1, Benign=0)
+y = df['label'].map({'Ransomware': 1, 'Benign': 0})
+print(f"X shape: {X.shape}")
+print(f"y shape: {y.shape}")
+
+# 5. Split into train/test (70/30)
+print("\n📊 Splitting data (70% train, 30% test)...")
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+print(f"Training set: {X_train.shape[0]} samples")
+print(f"Testing set: {X_test.shape[0]} samples")
+
+# 6. Scale features (important for SVM)
+print("\n⚖️ Scaling features...")
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Save prepared data
+print("\n💾 Saving prepared data...")
+np.save('X_train.npy', X_train)
+np.save('X_test.npy', X_test)
+np.save('y_train.npy', y_train)
+np.save('y_test.npy', y_test)
+np.save('X_train_scaled.npy', X_train_scaled)
+np.save('X_test_scaled.npy', X_test_scaled)
+
+# Save feature names
+with open('feature_names.txt', 'w') as f:
+    for feat in feature_columns:
+        f.write(f"{feat}\n")
+
+print("✅ Data preparation complete!")
+print("\n📁 Files saved:")
+print("  - X_train.npy, X_test.npy: Features (unscaled)")
+print("  - y_train.npy, y_test.npy: Labels")
+print("  - X_train_scaled.npy, X_test_scaled.npy: Scaled features")
+print("  - feature_names.txt: List of feature names")
+
+# Quick verification
+print(f"\n📈 Verification:")
+print(f"  Training samples: {X_train.shape[0]} ({X_train.shape[0]/len(df)*100:.1f}%)")
+print(f"  Testing samples: {X_test.shape[0]} ({X_test.shape[0]/len(df)*100:.1f}%)")
+print(f"  Features used: {X_train.shape[1]}")
+print(f"  Ransomware in train: {y_train.sum()} ({y_train.sum()/len(y_train)*100:.1f}%)")
+print(f"  Ransomware in test: {y_test.sum()} ({y_test.sum()/len(y_test)*100:.1f}%)")

@@ -1,0 +1,166 @@
+import pandas as pd
+import numpy as np
+import os
+
+"""
+Phase 1 Dataset Preparation
+---------------------------
+Purpose:
+- Extract ransomware flows
+- Sample an equal number of benign flows (baseline only)
+- Create a clean binary-labelled dataset for Phase 1 analysis
+
+NOTE:
+This file is for baseline comparison ONLY (Benign vs Ransomware).
+Coordinated vs Individual ransomware is handled in Phase 2.
+"""
+
+DATA_FILE = "NF-ToN-IoT-v3.csv"  # Change this if your file has a different name
+CHUNK_SIZE = 50_000  # Reduced for safer memory usage
+
+def check_file_exists():
+    """Check if the data file exists in the current directory"""
+    print("🔍 Checking for data file...")
+    if os.path.exists(DATA_FILE):
+        print(f"✅ Found {DATA_FILE}")
+        file_size = os.path.getsize(DATA_FILE) / (1024**3)  # Size in GB
+        print(f"📊 File size: {file_size:.2f} GB")
+        return True
+    else:
+        print(f"❌ File {DATA_FILE} not found in current directory!")
+        print("📂 Current directory files:")
+        for file in os.listdir('.'):
+            if file.endswith('.csv'):
+                print(f"  - {file}")
+        return False
+
+def create_phase1_dataset():
+    """Main function to create the phase 1 dataset"""
+    
+    if not check_file_exists():
+        return None
+    
+    ransom_chunks = []
+    benign_chunks = []
+    
+    print("\n📥 Reading dataset in chunks...")
+    
+    try:
+        # First, let's check the columns
+        print("🔍 Checking column names...")
+        sample_df = pd.read_csv(DATA_FILE, nrows=5)
+        print(f"Columns: {list(sample_df.columns)}")
+        
+        # Check if 'Attack' column exists
+        if 'Attack' not in sample_df.columns:
+            print("❌ 'Attack' column not found!")
+            print(f"Available columns: {list(sample_df.columns)}")
+            # Try to find similar column names
+            for col in sample_df.columns:
+                if 'attack' in col.lower() or 'label' in col.lower() or 'class' in col.lower():
+                    print(f"⚠️  Found potential label column: '{col}'")
+            return None
+        
+        # Read the full dataset in chunks
+        for i, chunk in enumerate(pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE, low_memory=False)):
+            print(f"Processing chunk {i+1}...")
+            
+            # Make sure Attack column is string
+            chunk['Attack'] = chunk['Attack'].astype(str)
+            
+            # --- Ransomware flows ---
+            ransom_mask = chunk['Attack'].str.contains('ransom', case=False, na=False)
+            ransom = chunk[ransom_mask]
+            if not ransom.empty:
+                ransom_chunks.append(ransom)
+                print(f"  Found {len(ransom)} ransomware samples in chunk")
+            
+            # --- Benign flows ---
+            # Use exact match for 'Benign'
+            benign = chunk[chunk['Attack'] == 'Benign']
+            if not benign.empty:
+                benign_chunks.append(benign)
+                print(f"  Found {len(benign)} benign samples in chunk")
+            
+            # Optional: break early for testing
+            # if i == 2:  # Process only 3 chunks for testing
+            #     break
+        
+        print("\n🔗 Concatenating chunks...")
+        
+        if not ransom_chunks:
+            print("❌ No ransomware samples found!")
+            return None
+        
+        if not benign_chunks:
+            print("❌ No benign samples found!")
+            return None
+        
+        df_ransom = pd.concat(ransom_chunks, ignore_index=True)
+        df_benign = pd.concat(benign_chunks, ignore_index=True)
+        
+        print(f"Ransomware samples: {len(df_ransom):,}")
+        print(f"Benign samples (raw): {len(df_benign):,}")
+        
+        # Check value distribution in Attack column
+        print("\n📊 Attack value distribution in ransomware set:")
+        print(df_ransom['Attack'].value_counts())
+        
+        # --- Balance benign to ransomware size ---
+        print("\n⚖️ Sampling benign flows to match ransomware count...")
+        
+        # If benign samples are fewer than ransomware, take all
+        if len(df_benign) < len(df_ransom):
+            print(f"⚠️  Warning: Fewer benign samples ({len(df_benign):,}) than ransomware ({len(df_ransom):,})")
+            print("  Using all available benign samples")
+            # Option 1: Use all benign samples (dataset will be imbalanced)
+            # Option 2: Sample with replacement
+            df_benign = df_benign.sample(n=len(df_ransom), replace=True, random_state=42)
+        else:
+            df_benign = df_benign.sample(n=len(df_ransom), random_state=42)
+        
+        # --- Combine datasets ---
+        df_phase1 = pd.concat([df_ransom, df_benign], ignore_index=True)
+        
+        # --- Binary label ---
+        df_phase1["label"] = df_phase1["Attack"].apply(
+            lambda x: "Ransomware" if "ransom" in str(x).lower() else "Benign"
+        )
+        
+        print("\n📊 Final label distribution:")
+        print(df_phase1["label"].value_counts())
+        
+        # --- Save the dataset ---
+        OUTPUT_FILE = "phase1_benign_vs_ransomware.csv"
+        df_phase1.to_csv(OUTPUT_FILE, index=False)
+        
+        print(f"\n✅ Phase 1 dataset saved to: {OUTPUT_FILE}")
+        print(f"📊 Dataset shape: {df_phase1.shape}")
+        
+        # Save a small sample for verification
+        SAMPLE_FILE = "phase1_sample_1000.csv"
+        df_phase1.sample(min(1000, len(df_phase1))).to_csv(SAMPLE_FILE, index=False)
+        print(f"📋 Sample saved to: {SAMPLE_FILE}")
+        
+        return df_phase1
+        
+    except Exception as e:
+        print(f"❌ Error occurred: {e}")
+        print(f"Error type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("PHASE 1 DATASET PREPARATION")
+    print("=" * 50)
+    
+    df = create_phase1_dataset()
+    
+    if df is not None:
+        print("\n🎉 Phase 1 dataset creation completed successfully!")
+        print(f"Total samples: {len(df):,}")
+        print(f"Columns: {list(df.columns)}")
+    else:
+        print("\n💥 Failed to create Phase 1 dataset.")

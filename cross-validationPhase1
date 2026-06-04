@@ -1,0 +1,134 @@
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedKFold, cross_validate
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import matplotlib.pyplot as plt
+
+print("="*60)
+print("CROSS-VALIDATION STUDY")
+print("="*60)
+
+# Load full dataset (not pre-split)
+X = np.load('X_train.npy')
+X_test = np.load('X_test.npy')
+y = np.load('y_train.npy')
+y_test = np.load('y_test.npy')
+
+# Combine back to full dataset for proper CV
+X_full = np.vstack([X, X_test])
+y_full = np.concatenate([y, y_test])
+
+print(f"Full dataset: {X_full.shape[0]} samples, {X_full.shape[1]} features")
+
+# Define scoring metrics
+scoring = ['accuracy', 'precision', 'recall', 'f1', 'roc_auc']
+
+# 5-fold stratified CV
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ── Random Forest ──
+print("\n" + "="*50)
+print("5-FOLD CV: RANDOM FOREST")
+print("="*50)
+
+rf = RandomForestClassifier(
+    n_estimators=100,
+    criterion='gini',
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42,
+    n_jobs=-1
+)
+
+rf_cv = cross_validate(rf, X_full, y_full, cv=cv, scoring=scoring)
+
+print(f"Accuracy:  {rf_cv['test_accuracy'].mean():.4f} ± {rf_cv['test_accuracy'].std():.4f}")
+print(f"Precision: {rf_cv['test_precision'].mean():.4f} ± {rf_cv['test_precision'].std():.4f}")
+print(f"Recall:    {rf_cv['test_recall'].mean():.4f} ± {rf_cv['test_recall'].std():.4f}")
+print(f"F1-Score:  {rf_cv['test_f1'].mean():.4f} ± {rf_cv['test_f1'].std():.4f}")
+print(f"ROC-AUC:   {rf_cv['test_roc_auc'].mean():.4f} ± {rf_cv['test_roc_auc'].std():.4f}")
+
+# ── SVM (needs scaling inside CV to prevent leakage) ──
+print("\n" + "="*50)
+print("5-FOLD CV: SVM")
+print("="*50)
+
+svm_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('svm', SVC(kernel='rbf', C=1.0, gamma='scale',
+                probability=True, random_state=42))
+])
+
+svm_cv = cross_validate(svm_pipeline, X_full, y_full, cv=cv, scoring=scoring)
+
+print(f"Accuracy:  {svm_cv['test_accuracy'].mean():.4f} ± {svm_cv['test_accuracy'].std():.4f}")
+print(f"Precision: {svm_cv['test_precision'].mean():.4f} ± {svm_cv['test_precision'].std():.4f}")
+print(f"Recall:    {svm_cv['test_recall'].mean():.4f} ± {svm_cv['test_recall'].std():.4f}")
+print(f"F1-Score:  {svm_cv['test_f1'].mean():.4f} ± {svm_cv['test_f1'].std():.4f}")
+print(f"ROC-AUC:   {svm_cv['test_roc_auc'].mean():.4f} ± {svm_cv['test_roc_auc'].std():.4f}")
+
+# ── Save Results ──
+cv_results = pd.DataFrame({
+    'Model': ['Random Forest'] * 5 + ['SVM'] * 5,
+    'Fold': list(range(1, 6)) * 2,
+    'Accuracy':  list(rf_cv['test_accuracy']) + list(svm_cv['test_accuracy']),
+    'Precision': list(rf_cv['test_precision']) + list(svm_cv['test_precision']),
+    'Recall':    list(rf_cv['test_recall']) + list(svm_cv['test_recall']),
+    'F1':        list(rf_cv['test_f1']) + list(svm_cv['test_f1']),
+    'ROC_AUC':   list(rf_cv['test_roc_auc']) + list(svm_cv['test_roc_auc']),
+})
+cv_results.to_csv('cross_validation_results.csv', index=False)
+
+# ── Visualisation ──
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+metrics_plot = ['Accuracy', 'Precision', 'Recall', 'F1', 'ROC_AUC']
+rf_means = [rf_cv[f'test_{m.lower()}'].mean() for m in
+            ['accuracy','precision','recall','f1','roc_auc']]
+rf_stds  = [rf_cv[f'test_{m.lower()}'].std() for m in
+            ['accuracy','precision','recall','f1','roc_auc']]
+svm_means = [svm_cv[f'test_{m.lower()}'].mean() for m in
+             ['accuracy','precision','recall','f1','roc_auc']]
+svm_stds  = [svm_cv[f'test_{m.lower()}'].std() for m in
+             ['accuracy','precision','recall','f1','roc_auc']]
+
+x = np.arange(len(metrics_plot))
+width = 0.35
+
+axes[0].bar(x - width/2, rf_means, width, yerr=rf_stds,
+            label='Random Forest', color='steelblue', capsize=4)
+axes[0].bar(x + width/2, svm_means, width, yerr=svm_stds,
+            label='SVM', color='tomato', capsize=4)
+axes[0].set_xticks(x)
+axes[0].set_xticklabels(metrics_plot)
+axes[0].set_ylim([0.9, 1.02])
+axes[0].set_title('Phase 1: 5-Fold CV Results (Mean ± Std)')
+axes[0].set_ylabel('Score')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3, axis='y')
+
+# Per-fold F1 line plot
+for fold_f1, label, color in zip(
+    [rf_cv['test_f1'], svm_cv['test_f1']],
+    ['Random Forest', 'SVM'],
+    ['steelblue', 'tomato']
+):
+    axes[1].plot(range(1, 6), fold_f1, marker='o',
+                 label=label, color=color)
+
+axes[1].set_xlabel('Fold')
+axes[1].set_ylabel('F1-Score')
+axes[1].set_title('F1-Score per Fold')
+axes[1].set_ylim([0.9, 1.02])
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('cross_validation_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n✅ Cross-validation complete!")
+print("📁 Saved: cross_validation_results.csv, cross_validation_results.png")
