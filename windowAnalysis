@@ -1,0 +1,174 @@
+# ============================================
+# PHASE 2: WINDOW SIZE SENSITIVITY ANALYSIS
+# ============================================
+# Purpose: Test how different time window sizes affect
+# the coordination labeling of ransomware flows
+# ============================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tabulate import tabulate  # pip install tabulate (optional, for nice tables)
+
+print("="*70)
+print("PHASE 2: WINDOW SIZE SENSITIVITY ANALYSIS")
+print("="*70)
+print("Testing how different time window sizes affect")
+print("the Coordinated vs Individual label distribution\n")
+
+# -----------------------------------------------------------------
+# 1. Load ALL ransomware flows from the original dataset
+# -----------------------------------------------------------------
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000
+
+ransom_chunks = []
+print("📥 Loading ransomware flows...")
+
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE, low_memory=False):
+    mask = chunk["Attack"].astype(str).str.contains("ransom", case=False, na=False)
+    ransom = chunk[mask].copy()
+    if not ransom.empty:
+        ransom_chunks.append(ransom)
+
+df_ransom = pd.concat(ransom_chunks, ignore_index=True)
+print(f"✅ Total ransomware samples: {len(df_ransom)}")
+
+# Convert start time to seconds once (reused for all windows)
+df_ransom["flow_start_sec"] = (df_ransom["FLOW_START_MILLISECONDS"] / 1000).astype(int)
+print("✅ Created flow_start_sec column\n")
+
+# -----------------------------------------------------------------
+# 2. Test different window sizes
+# -----------------------------------------------------------------
+window_sizes = [10, 30, 60, 120, 300, 600]  # Added 600 for broader view
+results = {}
+detailed_counts = []
+
+print("🔍 Testing window sizes...")
+print("-" * 60)
+
+for WINDOW in window_sizes:
+    # Create time window column
+    df_ransom["time_window"] = df_ransom["flow_start_sec"] // WINDOW
+    
+    # For each source IP & window, count unique destination IPs
+    coord_counts = df_ransom.groupby(["IPV4_SRC_ADDR", "time_window"])["IPV4_DST_ADDR"].nunique().reset_index()
+    coord_counts["COORDINATION_LEVEL"] = coord_counts["IPV4_DST_ADDR"].apply(lambda x: "Coordinated" if x > 1 else "Individual")
+    
+    # Merge labels back
+    df_temp = df_ransom.merge(
+        coord_counts[["IPV4_SRC_ADDR", "time_window", "COORDINATION_LEVEL"]],
+        on=["IPV4_SRC_ADDR", "time_window"]
+    )
+    
+    # Get counts
+    counts = df_temp["COORDINATION_LEVEL"].value_counts()
+    results[WINDOW] = counts
+    
+    coord_count = counts.get('Coordinated', 0)
+    indiv_count = counts.get('Individual', 0)
+    total = coord_count + indiv_count
+    coord_percent = (coord_count / total) * 100
+    
+    detailed_counts.append({
+        'Window_Size': WINDOW,
+        'Coordinated': coord_count,
+        'Individual': indiv_count,
+        'Total': total,
+        'Coordinated_%': f"{coord_percent:.2f}%"
+    })
+    
+    print(f"Window {WINDOW:3d}s: Coordinated = {coord_count:4d} ({coord_percent:.1f}%), Individual = {indiv_count:4d}")
+
+print("-" * 60)
+
+# -----------------------------------------------------------------
+# 3. Display results in a nice table
+# -----------------------------------------------------------------
+print("\n📊 SUMMARY TABLE:")
+print("="*60)
+
+df_results = pd.DataFrame(detailed_counts)
+print(tabulate(df_results, headers='keys', tablefmt='grid', showindex=False))
+
+# Save to CSV
+df_results.to_csv('window_sensitivity_results.csv', index=False)
+print("\n✅ Results saved to: window_sensitivity_results.csv")
+
+# -----------------------------------------------------------------
+# 4. Create visualization
+# -----------------------------------------------------------------
+print("\n📈 Creating visualization...")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# Plot 1: Bar chart of coordinated counts
+axes[0].bar(df_results['Window_Size'].astype(str), df_results['Coordinated'], 
+            color='orange', edgecolor='black', alpha=0.7)
+axes[0].set_xlabel('Window Size (seconds)')
+axes[0].set_ylabel('Number of Coordinated Flows')
+axes[0].set_title('Coordinated Flows by Window Size')
+axes[0].grid(True, alpha=0.3, axis='y')
+
+# Add value labels on bars
+for i, v in enumerate(df_results['Coordinated']):
+    axes[0].text(i, v + 5, str(v), ha='center', fontweight='bold')
+
+# Plot 2: Percentage of coordinated flows
+axes[1].plot(df_results['Window_Size'], df_results['Coordinated'], 
+             marker='o', linewidth=2, markersize=8, color='red')
+axes[1].set_xlabel('Window Size (seconds)')
+axes[1].set_ylabel('Number of Coordinated Flows')
+axes[1].set_title('Trend: Coordinated Flows vs Window Size')
+axes[1].grid(True, alpha=0.3)
+axes[1].set_xticks(window_sizes)
+
+plt.tight_layout()
+plt.savefig('window_sensitivity_plot.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("✅ Plot saved to: window_sensitivity_plot.png")
+
+# -----------------------------------------------------------------
+# 5. Analysis and recommendations
+# -----------------------------------------------------------------
+print("\n" + "="*70)
+print("📝 ANALYSIS & RECOMMENDATIONS")
+print("="*70)
+
+# Find rate of change
+print("\n🔍 Key observations:")
+
+prev_count = None
+for idx, row in df_results.iterrows():
+    if idx > 0:
+        change = row['Coordinated'] - prev_count
+        pct_change = (change / prev_count) * 100 if prev_count > 0 else 0
+        print(f"  {prev_window}s → {row['Window_Size']}s: +{change} flows ({pct_change:.1f}% increase)")
+    prev_count = row['Coordinated']
+    prev_window = row['Window_Size']
+
+print("\n📌 Recommendations for your dissertation:")
+
+# Find the elbow point (where increase starts to plateau)
+diffs = []
+for i in range(1, len(df_results)):
+    diffs.append(df_results.iloc[i]['Coordinated'] - df_results.iloc[i-1]['Coordinated'])
+
+if len(diffs) > 2:
+    if diffs[0] > diffs[1] * 1.5:  # First jump is much larger
+        print("  • The biggest jump in coordinated flows happens at the smallest window sizes,")
+        print("    suggesting that rapid, bursty coordination is being captured.")
+    
+    if diffs[-1] < diffs[-2] * 0.5:  # Last increase is much smaller
+        print("  • The rate of increase slows down after 60-120 seconds,")
+        print("    indicating that 60 seconds is a reasonable 'elbow point'.")
+
+print("\n  • Your current 60-second window captures {:.1f}% of the maximum".format(
+    (df_results[df_results['Window_Size']==60]['Coordinated'].values[0] / 
+     df_results['Coordinated'].max()) * 100
+))
+
+print("\n✅ Analysis complete!")

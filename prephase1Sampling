@@ -1,0 +1,55 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+# Load your original dataset
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000
+
+# Collect ransomware and benign separately
+ransom_chunks = []
+benign_chunks = []
+
+print("📥 Creating time-agnostic balanced dataset...")
+
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE, low_memory=False):
+    # Extract ransomware (all types)
+    ransom_mask = chunk["Attack"].astype(str).str.contains("ransom", case=False, na=False)
+    ransom = chunk[ransom_mask].copy()
+    
+    # Extract benign (exact match)
+    benign = chunk[chunk["Attack"] == "Benign"].copy()
+    
+    if not ransom.empty:
+        ransom_chunks.append(ransom)
+    if not benign.empty:
+        benign_chunks.append(benign)
+
+df_ransom = pd.concat(ransom_chunks, ignore_index=True)
+df_benign = pd.concat(benign_chunks, ignore_index=True)
+
+print(f"Total ransomware: {len(df_ransom)}")
+print(f"Total benign: {len(df_benign)}")
+
+# Remove zero-duration flows (artifacts)
+initial_ransom = len(df_ransom)
+df_ransom = df_ransom[df_ransom["FLOW_DURATION_MILLISECONDS"] > 0]
+print(f"Removed {initial_ransom - len(df_ransom)} zero-duration ransomware flows")
+
+# Sample balanced dataset
+min_samples = min(len(df_ransom), 4000)  # Use 4000 or actual ransomware count
+df_ransom_sampled = df_ransom.sample(n=min_samples, random_state=42)
+df_benign_sampled = df_benign.sample(n=min_samples, random_state=42)
+
+# Combine and shuffle
+df_phase1 = pd.concat([df_ransom_sampled, df_benign_sampled], ignore_index=True)
+df_phase1 = df_phase1.sample(frac=1, random_state=42).reset_index(drop=True)
+
+# Create binary label
+df_phase1["binary_label"] = df_phase1["Attack"].apply(
+    lambda x: 1 if "ransom" in str(x).lower() else 0
+)
+
+print(f"\n✅ Final balanced dataset: {len(df_phase1)} samples")
+print(f"   Ransomware: {df_phase1['binary_label'].sum()}")
+print(f"   Benign: {len(df_phase1) - df_phase1['binary_label'].sum()}")

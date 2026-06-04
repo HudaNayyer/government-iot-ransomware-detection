@@ -1,0 +1,256 @@
+# ============================================
+# PHASE 2: Coordinated vs Individual Ransomware
+# ============================================
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, roc_auc_score
+from imblearn.over_sampling import SMOTE  # install with: pip install imblearn
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+print("="*70)
+print("PHASE 2: COORDINATED vs INDIVIDUAL RANSOMWARE DETECTION")
+print("="*70)
+
+# -----------------------------------------------------------------
+# 1. Load ALL ransomware flows from the original dataset
+# -----------------------------------------------------------------
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000
+
+ransom_chunks = []
+print("📥 Loading ransomware flows...")
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE, low_memory=False):
+    mask = chunk["Attack"].astype(str).str.contains("ransom", case=False, na=False)
+    ransom = chunk[mask].copy()
+    if not ransom.empty:
+        ransom_chunks.append(ransom)
+
+df_ransom = pd.concat(ransom_chunks, ignore_index=True)
+print(f"✅ Total ransomware samples: {len(df_ransom)}")
+
+# -----------------------------------------------------------------
+# 2. Apply your coordination labelling logic (EDA code)
+# -----------------------------------------------------------------
+print("\n🏷️  Labelling flows as Coordinated / Individual...")
+
+# Convert milliseconds to seconds for windowing
+df_ransom["flow_start_sec"] = (df_ransom["FLOW_START_MILLISECONDS"] / 1000).astype(int)
+WINDOW = 60  # seconds
+
+# Create time window column
+df_ransom["time_window"] = df_ransom["flow_start_sec"] // WINDOW
+
+# For each source IP & window, count unique destination IPs
+coord_counts = df_ransom.groupby(["IPV4_SRC_ADDR", "time_window"])["IPV4_DST_ADDR"].nunique().reset_index()
+coord_counts["COORDINATION_LEVEL"] = coord_counts["IPV4_DST_ADDR"].apply(lambda x: "Coordinated" if x > 1 else "Individual")
+
+# Merge labels back
+df_ransom = df_ransom.merge(
+    coord_counts[["IPV4_SRC_ADDR", "time_window", "COORDINATION_LEVEL"]],
+    on=["IPV4_SRC_ADDR", "time_window"]
+)
+
+# Check distribution
+print("\n📊 Coordination label distribution:")
+print(df_ransom["COORDINATION_LEVEL"].value_counts())
+print(f"   Total: {len(df_ransom)}")
+
+# -----------------------------------------------------------------
+# 3. Prepare features (NO temporal/IP columns – only behavioural)
+# -----------------------------------------------------------------
+print("\n🔍 Selecting behavioural features (no leakage)...")
+
+# Features to EXCLUDE (potential leakage or non‑behavioural)
+exclude_phase2 = [
+    'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
+    'flow_start_sec', 'time_window',
+    'IPV4_SRC_ADDR', 'IPV4_DST_ADDR',
+    'L4_SRC_PORT', 'L4_DST_PORT',
+    'Attack', 'Label', 'COORDINATION_LEVEL'  # exclude target
+]
+
+# All columns except excluded ones
+feature_cols = [c for c in df_ransom.columns if c not in exclude_phase2]
+
+print(f"Using {len(feature_cols)} behavioural features.")
+X = df_ransom[feature_cols].copy()
+y = df_ransom["COORDINATION_LEVEL"].map({"Individual": 0, "Coordinated": 1})
+
+# Fill missing / convert to numeric
+X = X.fillna(0)
+for col in X.columns:
+    if X[col].dtype == 'object':
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+X = X.fillna(0)
+
+print(f"X shape: {X.shape}, y shape: {y.shape}")
+print(f"Class distribution (0=Individual, 1=Coordinated):\n{y.value_counts()}")
+
+# -----------------------------------------------------------------
+# 4. Handle class imbalance (SMOTE) + train/test split
+# -----------------------------------------------------------------
+print("\n⚖️  Balancing classes with SMOTE...")
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X, y)
+print(f"After SMOTE: {X_resampled.shape[0]} samples, balanced.")
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X_resampled, y_resampled, test_size=0.3, random_state=42, stratify=y_resampled
+)
+
+print(f"Training set: {X_train.shape[0]} samples")
+print(f"Testing set: {X_test.shape[0]} samples")
+
+# Scale for SVM
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# -----------------------------------------------------------------
+# 5. Train Random Forest (no scaling needed)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("MODEL 1: RANDOM FOREST")
+print("="*50)
+
+rf = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=10,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    class_weight='balanced',
+    random_state=42,
+    n_jobs=-1
+)
+
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+y_proba_rf = rf.predict_proba(X_test)[:, 1]
+
+print("📊 Random Forest Performance:")
+print(f"F1-Score:  {f1_score(y_test, y_pred_rf):.4f}")
+print(f"ROC-AUC:   {roc_auc_score(y_test, y_proba_rf):.4f}")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred_rf, target_names=["Individual", "Coordinated"]))
+
+# -----------------------------------------------------------------
+# 6. Train SVM (scaled)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("MODEL 2: SUPPORT VECTOR MACHINE")
+print("="*50)
+
+svm = SVC(
+    kernel='rbf',
+    C=1.0,
+    probability=True,
+    class_weight='balanced',
+    random_state=42
+)
+
+svm.fit(X_train_scaled, y_train)
+y_pred_svm = svm.predict(X_test_scaled)
+y_proba_svm = svm.predict_proba(X_test_scaled)[:, 1]
+
+print("📊 SVM Performance:")
+print(f"F1-Score:  {f1_score(y_test, y_pred_svm):.4f}")
+print(f"ROC-AUC:   {roc_auc_score(y_test, y_proba_svm):.4f}")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred_svm, target_names=["Individual", "Coordinated"]))
+
+# -----------------------------------------------------------------
+# 7. Feature Importance (Random Forest)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("FEATURE IMPORTANCE (COORDINATION DETECTION)")
+print("="*50)
+
+importances = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': rf.feature_importances_
+}).sort_values('Importance', ascending=False)
+
+print("🔝 Top 15 Most Important Features for Coordination:")
+print("-" * 60)
+for i, row in importances.head(15).iterrows():
+    print(f"{i+1:2}. {row['Feature']:35} - {row['Importance']:.4f}")
+
+importances.to_csv('phase2_feature_importance.csv', index=False)
+
+# -----------------------------------------------------------------
+# 8. Visualizations (Confusion Matrices Only)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("GENERATING VISUALISATIONS")
+print("="*50)
+
+# Set grid to 1x2 for just the confusion matrices
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Confusion Matrix - RF
+cm_rf = confusion_matrix(y_test, y_pred_rf)
+sns.heatmap(cm_rf, annot=True, fmt='d', cmap='Blues', ax=axes[0])
+axes[0].set_title('Random Forest Confusion Matrix')
+axes[0].set_xlabel('Predicted'); axes[0].set_ylabel('Actual')
+axes[0].set_xticklabels(['Individual', 'Coordinated'])
+axes[0].set_yticklabels(['Individual', 'Coordinated'])
+
+# Confusion Matrix - SVM
+cm_svm = confusion_matrix(y_test, y_pred_svm)
+sns.heatmap(cm_svm, annot=True, fmt='d', cmap='Reds', ax=axes[1])
+axes[1].set_title('SVM Confusion Matrix')
+axes[1].set_xlabel('Predicted'); axes[1].set_ylabel('Actual')
+axes[1].set_xticklabels(['Individual', 'Coordinated'])
+axes[1].set_yticklabels(['Individual', 'Coordinated'])
+
+# --- Removed: Feature Importance and Class Distribution plots ---
+
+plt.tight_layout()
+plt.savefig('phase2_confusion_matrices.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n✅ Phase 2 complete!")
+print("📁 Saved: phase2_feature_importance.csv, phase2_confusion_matrices.png")
+
+rf_metrics_sm = [
+    accuracy_score(y_test, y_pred_rf),
+    precision_score(y_test, y_pred_rf, average='macro'),
+    recall_score(y_test, y_pred_rf, average='macro'),
+    f1_score(y_test, y_pred_rf, average='macro')
+]
+
+svm_metrics_sm = [
+    accuracy_score(y_test, y_pred_svm),
+    precision_score(y_test, y_pred_svm, average='macro'),
+    recall_score(y_test, y_pred_svm, average='macro'),
+    f1_score(y_test, y_pred_svm, average='macro')
+]
+
+metrics_labels = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+x = np.arange(len(metrics_labels))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(12, 7))
+# Blue for RF, Red for SVM to match Phase 1
+rects1 = ax.bar(x - width/2, rf_metrics_sm, width, label='Random Forest', color='royalblue')
+rects2 = ax.bar(x + width/2, svm_metrics_sm, width, label='SVM', color='indianred')
+
+ax.set_ylabel('Score')
+ax.set_title('Phase 2 Performance Metrics Comparison (WITH SMOTE)')
+ax.set_xticks(x)
+ax.set_xticklabels(metrics_labels)
+ax.set_ylim(0, 1.1)
+ax.legend(loc='lower right')
+
+autolabel(rects1)
+autolabel(rects2)
+
+plt.tight_layout()
+plt.savefig('phase2_with_smote_all_metrics.png', dpi=300)
+plt.show()

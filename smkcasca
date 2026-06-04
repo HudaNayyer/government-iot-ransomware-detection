@@ -1,0 +1,353 @@
+# ============================================
+# PHASE 2: Coordinated vs Individual Ransomware
+# ============================================
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, roc_auc_score, accuracy_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+print("="*70)
+print("PHASE 2: COORDINATED vs INDIVIDUAL RANSOMWARE DETECTION")
+print("="*70)
+
+# -----------------------------------------------------------------
+# 1. Load ALL ransomware flows from the original dataset
+# -----------------------------------------------------------------
+DATA_FILE = "NF-ToN-IoT-v3.csv"
+CHUNK_SIZE = 200_000
+
+ransom_chunks = []
+print("📥 Loading ransomware flows...")
+for chunk in pd.read_csv(DATA_FILE, chunksize=CHUNK_SIZE, low_memory=False):
+    mask = chunk["Attack"].astype(str).str.contains("ransom", case=False, na=False)
+    ransom = chunk[mask].copy()
+    if not ransom.empty:
+        ransom_chunks.append(ransom)
+
+df_ransom = pd.concat(ransom_chunks, ignore_index=True)
+print(f"✅ Total ransomware samples: {len(df_ransom)}")
+
+# -----------------------------------------------------------------
+# 2. Apply your coordination labelling logic (EDA code)
+# -----------------------------------------------------------------
+print("\n🏷️  Labelling flows as Coordinated / Individual...")
+
+# Convert milliseconds to seconds for windowing
+df_ransom["flow_start_sec"] = (df_ransom["FLOW_START_MILLISECONDS"] / 1000).astype(int)
+WINDOW = 60  # seconds
+
+# Create time window column
+df_ransom["time_window"] = df_ransom["flow_start_sec"] // WINDOW
+
+# For each source IP & window, count unique destination IPs
+coord_counts = df_ransom.groupby(["IPV4_SRC_ADDR", "time_window"])["IPV4_DST_ADDR"].nunique().reset_index()
+coord_counts["COORDINATION_LEVEL"] = coord_counts["IPV4_DST_ADDR"].apply(lambda x: "Coordinated" if x > 1 else "Individual")
+
+# Merge labels back
+df_ransom = df_ransom.merge(
+    coord_counts[["IPV4_SRC_ADDR", "time_window", "COORDINATION_LEVEL"]],
+    on=["IPV4_SRC_ADDR", "time_window"]
+)
+
+# Check distribution
+print("\n📊 Coordination label distribution:")
+print(df_ransom["COORDINATION_LEVEL"].value_counts())
+print(f"   Total: {len(df_ransom)}")
+
+# -----------------------------------------------------------------
+# 3. Prepare features (NO temporal/IP columns – only behavioural)
+# -----------------------------------------------------------------
+print("\n🔍 Selecting behavioural features (no leakage)...")
+
+# Features to EXCLUDE (potential leakage or non‑behavioural)
+exclude_phase2 = [
+    'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
+    'flow_start_sec', 'time_window',
+    'IPV4_SRC_ADDR', 'IPV4_DST_ADDR',
+    'L4_SRC_PORT', 'L4_DST_PORT',
+    'Attack', 'Label', 'COORDINATION_LEVEL'  # exclude target
+]
+
+# All columns except excluded ones
+feature_cols = [c for c in df_ransom.columns if c not in exclude_phase2]
+
+print(f"Using {len(feature_cols)} behavioural features.")
+X = df_ransom[feature_cols].copy()
+y = df_ransom["COORDINATION_LEVEL"].map({"Individual": 0, "Coordinated": 1})
+
+# Fill missing / convert to numeric
+X = X.fillna(0)
+for col in X.columns:
+    if X[col].dtype == 'object':
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+X = X.fillna(0)
+
+print(f"X shape: {X.shape}, y shape: {y.shape}")
+print(f"Class distribution (0=Individual, 1=Coordinated):\n{y.value_counts()}")
+
+# -----------------------------------------------------------------
+# 4. Train/test split (NO SMOTE – use original imbalanced data)
+# -----------------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+
+print(f"Training set: {X_train.shape[0]} samples")
+print(f"Testing set: {X_test.shape[0]} samples")
+
+# Scale for SVM
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# -----------------------------------------------------------------
+# 5. Train Random Forest (no scaling needed, but with class_weight)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("MODEL 1: RANDOM FOREST")
+print("="*50)
+
+rf = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=10,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    class_weight='balanced',  # handles imbalance by weighting classes
+    random_state=42,
+    n_jobs=-1
+)
+
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+y_proba_rf = rf.predict_proba(X_test)[:, 1]
+
+print("📊 Random Forest Performance:")
+print(f"F1-Score (macro): {f1_score(y_test, y_pred_rf, average='macro'):.4f}")
+print(f"ROC-AUC:          {roc_auc_score(y_test, y_proba_rf):.4f}")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred_rf, target_names=["Individual", "Coordinated"]))
+
+# -----------------------------------------------------------------
+# 6. Train SVM (scaled, with class_weight)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("MODEL 2: SUPPORT VECTOR MACHINE")
+print("="*50)
+
+svm = SVC(
+    kernel='rbf',
+    C=1.0,
+    probability=True,
+    class_weight='balanced',
+    random_state=42
+)
+
+svm.fit(X_train_scaled, y_train)
+y_pred_svm = svm.predict(X_test_scaled)
+y_proba_svm = svm.predict_proba(X_test_scaled)[:, 1]
+
+print("📊 SVM Performance:")
+print(f"F1-Score (macro): {f1_score(y_test, y_pred_svm, average='macro'):.4f}")
+print(f"ROC-AUC:          {roc_auc_score(y_test, y_proba_svm):.4f}")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred_svm, target_names=["Individual", "Coordinated"]))
+
+# -----------------------------------------------------------------
+# 7. Feature Importance (Random Forest)
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("FEATURE IMPORTANCE (COORDINATION DETECTION)")
+print("="*50)
+
+importances = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': rf.feature_importances_
+}).sort_values('Importance', ascending=False)
+
+print("🔝 Top 15 Most Important Features for Coordination:")
+print("-" * 60)
+for i, row in importances.head(15).iterrows():
+    print(f"{i+1:2}. {row['Feature']:35} - {row['Importance']:.4f}")
+
+importances.to_csv('phase2_feature_importance.csv', index=False)
+
+# -----------------------------------------------------------------
+# 8. Visualizations
+# -----------------------------------------------------------------
+print("\n" + "="*50)
+print("GENERATING VISUALISATIONS")
+print("="*50)
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# Confusion Matrix - RF
+cm_rf = confusion_matrix(y_test, y_pred_rf)
+sns.heatmap(cm_rf, annot=True, fmt='d', cmap='Blues', ax=axes[0,0])
+axes[0,0].set_title('Random Forest Confusion Matrix')
+axes[0,0].set_xlabel('Predicted'); axes[0,0].set_ylabel('Actual')
+axes[0,0].set_xticklabels(['Individual', 'Coordinated'])
+axes[0,0].set_yticklabels(['Individual', 'Coordinated'])
+
+# Confusion Matrix - SVM
+cm_svm = confusion_matrix(y_test, y_pred_svm)
+sns.heatmap(cm_svm, annot=True, fmt='d', cmap='Reds', ax=axes[0,1])
+axes[0,1].set_title('SVM Confusion Matrix')
+axes[0,1].set_xlabel('Predicted'); axes[0,1].set_ylabel('Actual')
+axes[0,1].set_xticklabels(['Individual', 'Coordinated'])
+axes[0,1].set_yticklabels(['Individual', 'Coordinated'])
+
+# Feature Importance (top 10)
+top10 = importances.head(10)
+axes[1,0].barh(top10['Feature'][::-1], top10['Importance'][::-1], color='teal')
+axes[1,0].set_xlabel('Importance')
+axes[1,0].set_title('Top 10 Features for Coordination Detection')
+
+# Class distribution before SMOTE (original)
+orig_counts = df_ransom["COORDINATION_LEVEL"].value_counts()
+axes[1,1].bar(orig_counts.index, orig_counts.values, color=['green', 'orange'])
+axes[1,1].set_title('Original Class Distribution')
+axes[1,1].set_ylabel('Number of Flows')
+axes[1,1].set_xlabel('Coordination Level')
+
+plt.tight_layout()
+plt.savefig('phase2_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n✅ Phase 2 complete!")
+print("📁 Saved: phase2nosmote_feature_importance.csv, phase2nosmote_results.png")
+rf_acc = accuracy_score(y_test, y_pred_rf)
+rf_f1 = f1_score(y_test, y_pred_rf)
+
+svm_acc = accuracy_score(y_test, y_pred_svm)
+svm_f1 = f1_score(y_test, y_pred_svm)
+
+# Data for plotting
+models = ['Random Forest', 'SVM']
+accuracy_scores = [rf_acc, svm_acc]
+f1_scores = [rf_f1, svm_f1]
+
+x = np.arange(len(models))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(10, 6))
+rects1 = ax.bar(x - width/2, accuracy_scores, width, label='Accuracy', color='skyblue')
+rects2 = ax.bar(x + width/2, f1_scores, width, label='F1-Score', color='salmon')
+
+ax.set_ylabel('Scores')
+ax.set_title('Phase 2 Performance Comparison (WITHOUT SMOTE)')
+ax.set_xticks(x)
+ax.set_xticklabels(models)
+ax.set_ylim(0, 1.1)
+ax.legend()
+
+# Add labels on top of bars
+def autolabel(rects):
+    for rect in rects:
+        height = rect.get_height()
+        ax.annotate(f'{height:.2f}', xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom')
+
+autolabel(rects1)
+autolabel(rects2)
+
+plt.tight_layout()
+plt.savefig('phase2_no_smote_comparison.png')
+plt.show()
+
+# -----------------------------------------------------------------
+# PHASE 2 VISUALIZATION: ALL METRICS (NO SMOTE)
+# -----------------------------------------------------------------
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# Calculate all 4 metrics for both models
+# We use average='macro' to ensure the minority class (Coordinated) is weighted fairly
+rf_metrics = [
+    accuracy_score(y_test, y_pred_rf),
+    precision_score(y_test, y_pred_rf, average='macro'),
+    recall_score(y_test, y_pred_rf, average='macro'),
+    f1_score(y_test, y_pred_rf, average='macro')
+]
+
+svm_metrics = [
+    accuracy_score(y_test, y_pred_svm),
+    precision_score(y_test, y_pred_svm, average='macro'),
+    recall_score(y_test, y_pred_svm, average='macro'),
+    f1_score(y_test, y_pred_svm, average='macro')
+]
+
+metrics_labels = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+x = np.arange(len(metrics_labels))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(12, 7))
+# Blue for RF, Red for SVM as requested
+rects1 = ax.bar(x - width/2, rf_metrics, width, label='Random Forest', color='royalblue')
+rects2 = ax.bar(x + width/2, svm_metrics, width, label='SVM', color='indianred')
+
+ax.set_ylabel('Score')
+ax.set_title('Phase 2 Performance Metrics Comparison (WITHOUT SMOTE)')
+ax.set_xticks(x)
+ax.set_xticklabels(metrics_labels)
+ax.set_ylim(0, 1.1)
+ax.legend(loc='lower right')
+
+def autolabel(rects):
+    for rect in rects:
+        height = rect.get_height()
+        ax.annotate(f'{height:.2f}', xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=10)
+
+autolabel(rects1)
+autolabel(rects2)
+
+plt.tight_layout()
+plt.savefig('phase2_no_smote_all_metrics.png', dpi=300)
+plt.show()
+# Calculating metrics on original imbalanced data
+rf_metrics_ns = [
+    accuracy_score(y_test, y_pred_rf),
+    precision_score(y_test, y_pred_rf, average='weighted'),
+    recall_score(y_test, y_pred_rf, average='weighted'),
+    f1_score(y_test, y_pred_rf, average='weighted')
+]
+
+svm_metrics_ns = (
+    accuracy_score(y_test, y_pred_svm),
+    precision_score(y_test, y_pred_svm, average='weighted'),
+    recall_score(y_test, y_pred_svm, average='weighted'),
+    f1_score(y_test, y_pred_svm, average='weighted')
+)
+
+metrics_labels = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+x = np.arange(len(metrics_labels))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(12, 7))
+rects1 = ax.bar(x - width/2, rf_metrics_ns, width, label='Random Forest', color='royalblue')
+rects2 = ax.bar(x + width/2, svm_metrics_ns, width, label='SVM', color='indianred')
+
+ax.set_ylabel('Score')
+ax.set_title('Phase 2: Performance WITHOUT SMOTE (Imbalanced)')
+ax.set_xticks(x)
+ax.set_xticklabels(metrics_labels)
+ax.set_ylim(0, 1.1)
+ax.legend(loc='lower right')
+
+def autolabel(rects):
+    for rect in rects:
+        height = rect.get_height()
+        ax.annotate(f'{height:.2f}', xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontweight='bold')
+
+autolabel(rects1)
+autolabel(rects2)
+
+plt.tight_layout()
+plt.savefig('phase2_NO_SMOTE_metrics.png', dpi=300)
+plt.show()

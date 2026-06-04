@@ -1,0 +1,170 @@
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+print("="*60)
+print("PHASE 1: TRAINING MACHINE LEARNING MODELS")
+print("="*60)
+
+# Load prepared data
+print("📥 Loading prepared data...")
+X_train = np.load('X_train.npy')
+X_test = np.load('X_test.npy')
+y_train = np.load('y_train.npy')
+y_test = np.load('y_test.npy')
+X_train_scaled = np.load('X_train_scaled.npy')
+X_test_scaled = np.load('X_test_scaled.npy')
+
+print(f"Training data: {X_train.shape[0]} samples, {X_train.shape[1]} features")
+print(f"Testing data: {X_test.shape[0]} samples")
+
+# Load feature names
+with open('feature_names.txt', 'r') as f:
+    feature_names = [line.strip() for line in f]
+print(f"Features used: {len(feature_names)}")
+
+# 1. Train Random Forest (doesn't need scaling)
+print("\n" + "="*50)
+print("TRAINING RANDOM FOREST")
+print("="*50)
+
+rf_model = RandomForestClassifier(
+    n_estimators=100,
+    criterion='gini',
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42,
+    n_jobs=-1
+)
+
+rf_model.fit(X_train, y_train)
+rf_pred = rf_model.predict(X_test)
+rf_pred_proba = rf_model.predict_proba(X_test)[:, 1]
+
+print("📊 Random Forest Results:")
+print("-" * 40)
+print(f"Accuracy:  {accuracy_score(y_test, rf_pred):.4f}")
+print(f"Precision: {precision_score(y_test, rf_pred):.4f}")
+print(f"Recall:    {recall_score(y_test, rf_pred):.4f}")
+print(f"F1-Score:  {f1_score(y_test, rf_pred):.4f}")
+print(f"ROC-AUC:   {roc_auc_score(y_test, rf_pred_proba):.4f}")
+
+# 2. Train SVM (needs scaling)
+print("\n" + "="*50)
+print("TRAINING SUPPORT VECTOR MACHINE (SVM)")
+print("="*50)
+
+svm_model = SVC(
+    kernel='rbf',
+    C=1.0,
+    probability=True,
+    random_state=42
+)
+
+svm_model.fit(X_train_scaled, y_train)
+svm_pred = svm_model.predict(X_test_scaled)
+svm_pred_proba = svm_model.predict_proba(X_test_scaled)[:, 1]
+
+print("📊 SVM Results:")
+print("-" * 40)
+print(f"Accuracy:  {accuracy_score(y_test, svm_pred):.4f}")
+print(f"Precision: {precision_score(y_test, svm_pred):.4f}")
+print(f"Recall:    {recall_score(y_test, svm_pred):.4f}")
+print(f"F1-Score:  {f1_score(y_test, svm_pred):.4f}")
+print(f"ROC-AUC:   {roc_auc_score(y_test, svm_pred_proba):.4f}")
+
+# 3. Feature Importance (Random Forest)
+print("\n" + "="*50)
+print("FEATURE IMPORTANCE ANALYSIS")
+print("="*50)
+
+feature_importance = pd.DataFrame({
+    'Feature': feature_names,
+    'Importance': rf_model.feature_importances_
+}).sort_values('Importance', ascending=False)
+
+print("🔝 Top 15 Most Important Features:")
+print("-" * 50)
+for i, row in feature_importance.head(15).iterrows():
+    print(f"{i+1:2}. {row['Feature']:30} - {row['Importance']:.4f}")
+
+# Save results
+feature_importance.to_csv('phase1_feature_importance.csv', index=False)
+
+# 4. Create Simple Visualization
+print("\n" + "="*50)
+print("CREATING VISUALIZATION")
+print("="*50)
+
+# Changed to (1, 2) to show only Confusion Matrices side-by-side
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# --- FEATURE IMPORTANCE PLOT COMMENTED OUT ---
+# axes[0, 0].barh(range(15), feature_importance.head(15)['Importance'][::-1])
+# axes[0, 0].set_yticks(range(15))
+# axes[0, 0].set_yticklabels(feature_importance.head(15)['Feature'][::-1], fontsize=9)
+# axes[0, 0].set_xlabel('Importance')
+# axes[0, 0].set_title('Top 15 Feature Importances')
+
+# --- PERFORMANCE COMPARISON BAR CHART COMMENTED OUT ---
+# metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score']
+# rf_metrics = [accuracy_score(y_test, rf_pred), precision_score(y_test, rf_pred), recall_score(y_test, rf_pred), f1_score(y_test, rf_pred)]
+# svm_metrics = [accuracy_score(y_test, svm_pred), precision_score(y_test, svm_pred), recall_score(y_test, svm_pred), f1_score(y_test, svm_pred)]
+# x = np.arange(len(metrics))
+# width = 0.35
+# axes[0, 1].bar(x - width/2, rf_metrics, width, label='Random Forest', color='blue')
+# axes[0, 1].bar(x + width/2, svm_metrics, width, label='SVM', color='red')
+# axes[0, 1].set_xticks(x)
+# axes[0, 1].set_xticklabels(metrics)
+# axes[0, 1].set_ylim([0, 1.1])
+# axes[0, 1].set_ylabel('Score')
+# axes[0, 1].set_title('Model Performance Comparison')
+# axes[0, 1].legend()
+# axes[0, 1].grid(True, alpha=0.3, axis='y')
+
+# Confusion Matrix - Random Forest
+cm_rf = confusion_matrix(y_test, rf_pred)
+sns.heatmap(cm_rf, annot=True, fmt='d', cmap='Blues', ax=axes[0])
+axes[0].set_title('Random Forest Confusion Matrix')
+axes[0].set_xlabel('Predicted')
+axes[0].set_ylabel('Actual')
+axes[0].set_xticklabels(['Benign', 'Ransomware'])
+axes[0].set_yticklabels(['Benign', 'Ransomware'])
+
+# Confusion Matrix - SVM
+cm_svm = confusion_matrix(y_test, svm_pred)
+sns.heatmap(cm_svm, annot=True, fmt='d', cmap='Reds', ax=axes[1])
+axes[1].set_title('SVM Confusion Matrix')
+axes[1].set_xlabel('Predicted')
+axes[1].set_ylabel('Actual')
+axes[1].set_xticklabels(['Benign', 'Ransomware'])
+axes[1].set_yticklabels(['Benign', 'Ransomware'])
+
+plt.tight_layout()
+plt.savefig('phase1_confusion_matrices.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 5. Save Model Results
+print("\n" + "="*50)
+print("SAVING RESULTS")
+print("="*50)
+
+results_df = pd.DataFrame({
+    'Model': ['Random Forest', 'SVM'],
+    'Accuracy': [accuracy_score(y_test, rf_pred), accuracy_score(y_test, svm_pred)],
+    'Precision': [precision_score(y_test, rf_pred), precision_score(y_test, svm_pred)],
+    'Recall': [recall_score(y_test, rf_pred), recall_score(y_test, svm_pred)],
+    'F1_Score': [f1_score(y_test, rf_pred), f1_score(y_test, svm_pred)],
+    'ROC_AUC': [roc_auc_score(y_test, rf_pred_proba), roc_auc_score(y_test, svm_pred_proba)]
+})
+
+results_df.to_csv('phase1_model_results.csv', index=False)
+print("✅ Results saved to 'phase1_model_results.csv'")
+
+print("\n" + "="*60)
+print("PHASE 1 COMPLETE!")
+print("="*60)

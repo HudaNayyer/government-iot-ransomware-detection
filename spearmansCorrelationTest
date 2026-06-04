@@ -1,0 +1,15 @@
+import pandas as pd
+from scipy.stats import spearmanr
+
+classweights_fi = pd.read_csv('phase2_feature_importance.csv')  
+
+smote_fi = pd.read_csv('phase2smote_feature_importance.csv')
+
+merged = smote_fi.merge(classweights_fi, on='Feature', suffixes=('_smote', '_cw'))
+rho, pval = spearmanr(merged['Importance_smote'], merged['Importance_cw'])
+print(f"Spearman rho: {rho:.4f}, p-value: {pval:.4f}")
+
+
+
+
+
